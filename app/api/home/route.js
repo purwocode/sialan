@@ -7,8 +7,7 @@ export const runtime = "nodejs";
 /* ===============================
    API ENDPOINTS
 =============================== */
-const THEATER_API =
-  "https://netshort.sansekai.my.id/api/netshort/theaters";
+const THEATER_API = "https://netshort.sansekai.my.id/api/netshort/theaters";
 
 const DRAMABOX_APIS = {
   vip: "https://dramabox.sansekai.my.id/api/dramabox/vip",
@@ -17,8 +16,7 @@ const DRAMABOX_APIS = {
   random: "https://dramabox.sansekai.my.id/api/dramabox/randomdrama",
   latest: "https://dramabox.sansekai.my.id/api/dramabox/latest",
   trending: "https://dramabox.sansekai.my.id/api/dramabox/trending",
-  populersearch:
-    "https://dramabox.sansekai.my.id/api/dramabox/populersearch",
+  populersearch: "https://dramabox.sansekai.my.id/api/dramabox/populersearch",
 };
 
 const MELOLO_APIS = {
@@ -26,20 +24,24 @@ const MELOLO_APIS = {
   trending: "https://melolo-api-azure.vercel.app/api/melolo/trending",
 };
 
-const FLICK_LATEST =
-  "https://api.sansekai.my.id/api/flickreels/latest";
-const FLICK_FORYOU =
-  "https://api.sansekai.my.id/api/flickreels/foryou";
+const FLICK_LATEST = "https://api.sansekai.my.id/api/flickreels/latest";
+const FLICK_FORYOU = "https://api.sansekai.my.id/api/flickreels/foryou";
 
-// Debug: untuk cek IP direct vs proxy
+// Debug: cek IP direct vs proxy
 const IPIFY = "https://api.ipify.org?format=json";
 
 /* ===============================
-   RTDB (REST)
+   RTDB (REST) - ✅ FIXED PATH + AUTH
+   Struktur benar:
+   /proxies/{proxyId} => { alive, lastChecked, proxy: "IP:PORT" }
+   Jadi list berada di: /proxies.json?auth=...
 =============================== */
 const RTDB_BASE_URL =
   "https://proxy-cf6c5-default-rtdb.asia-southeast1.firebasedatabase.app";
-const RTDB_PROXY_PATH = "proxies/proxies";
+const RTDB_PROXY_PATH = "proxies";
+
+// ⚠️ Jangan commit ke repo public. Ini ditaruh di sini karena kamu bilang tidak pakai env.
+const RTDB_AUTH = "3HMgkYtC2RlIRFKGH5iwThpcALmsGirFGwsAT5tu";
 
 /* ===============================
    HEADERS
@@ -90,7 +92,8 @@ let proxyCache = { list: [], ts: 0 };
 const CACHE_MS = 30_000;
 
 function rtdbUrl(path) {
-  return `${RTDB_BASE_URL}/${path}.json`;
+  const base = RTDB_BASE_URL.replace(/\/$/, "");
+  return `${base}/${path}.json?auth=${encodeURIComponent(RTDB_AUTH)}`;
 }
 
 function pickProxy(list) {
@@ -112,9 +115,15 @@ async function getAliveProxy(debugLog) {
     return picked;
   }
 
+  // ✅ FIX: fetch dari /proxies.json (bukan /proxies/proxies.json)
   const res = await fetch(rtdbUrl(RTDB_PROXY_PATH), { cache: "no-store" });
   if (!res.ok) {
-    debugLog?.push({ step: "proxy_rtdb_fetch_failed", status: res.status });
+    const text = await res.text().catch(() => "");
+    debugLog?.push({
+      step: "proxy_rtdb_fetch_failed",
+      status: res.status,
+      body: text.slice(0, 200),
+    });
     return null;
   }
 
@@ -124,6 +133,7 @@ async function getAliveProxy(debugLog) {
     return null;
   }
 
+  // data: { "101_132_...:6588": { alive, lastChecked, proxy }, ... }
   const list = Object.values(data)
     .filter(
       (p) =>
@@ -196,7 +206,7 @@ async function fetchFlickViaSocks(url, debug = false, debugLog = []) {
     });
   }
 
-  // coba via socks dulu
+  // try socks first
   if (meta.proxyUrl) {
     try {
       const agent = new SocksProxyAgent(meta.proxyUrl);
@@ -232,7 +242,11 @@ async function fetchFlickViaSocks(url, debug = false, debugLog = []) {
     if (!res.ok) {
       meta.mode = "direct";
       meta.error = `direct_http_${res.status}`;
-      if (debug) debugLog.push({ step: "flick_fetch_direct_failed", status: res.status });
+      if (debug)
+        debugLog.push({
+          step: "flick_fetch_direct_failed",
+          status: res.status,
+        });
       return { json: null, meta };
     }
     const json = await res.json();
@@ -242,7 +256,8 @@ async function fetchFlickViaSocks(url, debug = false, debugLog = []) {
   } catch (err) {
     meta.mode = "direct";
     meta.error = err?.message || String(err);
-    if (debug) debugLog.push({ step: "flick_fetch_direct_exception", error: meta.error });
+    if (debug)
+      debugLog.push({ step: "flick_fetch_direct_exception", error: meta.error });
     return { json: null, meta };
   }
 }
@@ -262,13 +277,11 @@ export async function GET(req) {
   };
 
   try {
-    // Flick via socks (dengan meta)
     const [latestRes, foryouRes] = await Promise.all([
       fetchFlickViaSocks(FLICK_LATEST, debug, debugLog),
       fetchFlickViaSocks(FLICK_FORYOU, debug, debugLog),
     ]);
 
-    // API lain (direct)
     const [theaterJson, dramaboxJsons, meloloJsons] = await Promise.all([
       safeFetch(THEATER_API),
       Promise.all(Object.values(DRAMABOX_APIS).map((u) => safeFetch(u))),
@@ -282,7 +295,6 @@ export async function GET(req) {
       flickDebug.latest = latestRes.meta;
       flickDebug.foryou = foryouRes.meta;
 
-      // Cek IP direct vs proxy (pakai proxy dari latest kalau ada)
       const directIp = await getIpDirect();
       const proxyIp = latestRes.meta?.proxyUrl
         ? await getIpViaProxy(latestRes.meta.proxyUrl)
@@ -433,16 +445,14 @@ export async function GET(req) {
       ...normalizeFlick(flickForYouJson, "flick_foryou", "✨ FlickReels For You"),
     ];
 
-    // tambahkan header debug di response
-    const headers = new Headers();
+    const respHeaders = new Headers();
     if (debug) {
-      // kalau latest sukses socks, tampilkan proxy yg dipakai
-      headers.set("X-Proxy-Mode-Latest", flickDebug.latest?.mode || "unknown");
-      headers.set("X-Proxy-Used-Latest", flickDebug.latest?.proxy || "");
-      headers.set("X-Proxy-Mode-ForYou", flickDebug.foryou?.mode || "unknown");
-      headers.set("X-Proxy-Used-ForYou", flickDebug.foryou?.proxy || "");
-      headers.set("X-Proxy-Error-Latest", flickDebug.latest?.error || "");
-      headers.set("X-Proxy-Error-ForYou", flickDebug.foryou?.error || "");
+      respHeaders.set("X-Proxy-Mode-Latest", flickDebug.latest?.mode || "unknown");
+      respHeaders.set("X-Proxy-Used-Latest", flickDebug.latest?.proxy || "");
+      respHeaders.set("X-Proxy-Mode-ForYou", flickDebug.foryou?.mode || "unknown");
+      respHeaders.set("X-Proxy-Used-ForYou", flickDebug.foryou?.proxy || "");
+      respHeaders.set("X-Proxy-Error-Latest", flickDebug.latest?.error || "");
+      respHeaders.set("X-Proxy-Error-ForYou", flickDebug.foryou?.error || "");
     }
 
     return NextResponse.json(
@@ -457,7 +467,7 @@ export async function GET(req) {
             },
           }
         : { sections },
-      { headers }
+      { headers: respHeaders }
     );
   } catch (err) {
     return NextResponse.json(
