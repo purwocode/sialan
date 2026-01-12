@@ -15,12 +15,17 @@ const MELOLO_SEARCH = "https://melolo-api-azure.vercel.app/api/melolo/search";
 const FLICK_SEARCH = "https://api.sansekai.my.id/api/flickreels/search";
 
 /* ===============================
-   RTDB (REST)
-   /proxies/proxies/{id} => { alive, lastChecked, proxy: "IP:PORT" }
+   RTDB (REST) - ✅ FIXED PATH + AUTH
+   Struktur benar:
+   /proxies/{proxyId} => { alive, lastChecked, proxy: "IP:PORT" }
+   Jadi list berada di: /proxies.json?auth=...
 =============================== */
 const RTDB_BASE_URL =
   "https://proxy-cf6c5-default-rtdb.asia-southeast1.firebasedatabase.app";
-const RTDB_PROXY_PATH = "proxies/proxies";
+const RTDB_PROXY_PATH = "proxies";
+
+// ⚠️ Jangan commit ke repo public. Ini ditaruh di sini karena kamu bilang tidak pakai env.
+const RTDB_AUTH = "3HMgkYtC2RlIRFKGH5iwThpcALmsGirFGwsAT5tu";
 
 /* ===============================
    HEADERS
@@ -32,7 +37,7 @@ const BASE_HEADERS = {
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36",
 };
 
-// header untuk source lain (punya kamu)
+// header untuk source lain
 const headers = {
   accept:
     "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
@@ -41,7 +46,7 @@ const headers = {
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36",
 };
 
-// header minimal sesuai curl flick search (accept: */*)
+// header flick search (sesuai curl)
 const FLICK_SEARCH_HEADERS = {
   ...BASE_HEADERS,
   accept: "*/*",
@@ -77,7 +82,8 @@ let proxyCache = { list: [], ts: 0 };
 const CACHE_MS = 30_000;
 
 function rtdbUrl(path) {
-  return `${RTDB_BASE_URL}/${path}.json`;
+  const base = RTDB_BASE_URL.replace(/\/$/, "");
+  return `${base}/${path}.json?auth=${encodeURIComponent(RTDB_AUTH)}`;
 }
 
 function pickProxy(list) {
@@ -88,6 +94,7 @@ function pickProxy(list) {
 
 async function getAliveProxy(debugLog) {
   const now = Date.now();
+
   if (proxyCache.list.length && now - proxyCache.ts < CACHE_MS) {
     const picked = pickProxy(proxyCache.list);
     debugLog?.push({
@@ -98,9 +105,15 @@ async function getAliveProxy(debugLog) {
     return picked;
   }
 
+  // ✅ FIX: fetch dari /proxies.json (bukan /proxies/proxies.json)
   const res = await fetch(rtdbUrl(RTDB_PROXY_PATH), { cache: "no-store" });
   if (!res.ok) {
-    debugLog?.push({ step: "proxy_rtdb_fetch_failed", status: res.status });
+    const text = await res.text().catch(() => "");
+    debugLog?.push({
+      step: "proxy_rtdb_fetch_failed",
+      status: res.status,
+      body: text.slice(0, 200),
+    });
     return null;
   }
 
@@ -122,6 +135,7 @@ async function getAliveProxy(debugLog) {
     .map((p) => p.proxy.trim());
 
   proxyCache = { list, ts: now };
+
   debugLog?.push({
     step: "proxy_rtdb_loaded",
     totalAlive: list.length,
@@ -174,7 +188,10 @@ async function fetchFlickSearchViaSocks(url, debug = false, debugLog = []) {
     } catch (err) {
       meta.error = err?.message || String(err);
       if (debug)
-        debugLog.push({ step: "flick_search_socks_failed", error: meta.error });
+        debugLog.push({
+          step: "flick_search_socks_failed",
+          error: meta.error,
+        });
       console.error("FLICK SEARCH SOCKS FAILED:", meta.proxyUrl, meta.error);
     }
   } else {
@@ -205,7 +222,10 @@ async function fetchFlickSearchViaSocks(url, debug = false, debugLog = []) {
     meta.mode = "direct";
     meta.error = err?.message || String(err);
     if (debug)
-      debugLog.push({ step: "flick_search_direct_exception", error: meta.error });
+      debugLog.push({
+        step: "flick_search_direct_exception",
+        error: meta.error,
+      });
     return { json: null, meta };
   }
 }
@@ -219,22 +239,24 @@ export async function GET(req) {
   const debug = searchParams.get("debug") === "1";
 
   if (!q) {
-    return NextResponse.json({ error: "query (q) wajib diisi" }, { status: 400 });
+    return NextResponse.json(
+      { error: "query (q) wajib diisi" },
+      { status: 400 }
+    );
   }
 
   const debugLog = [];
   const flickDebug = { meta: null };
 
   try {
-    /* ===============================
-       FETCH SEMUA SOURCE
-    =============================== */
     const flickUrl = `${FLICK_SEARCH}?query=${encodeURIComponent(q)}`;
 
     const [dbJson, nsJson, mlJson, flickRes] = await Promise.all([
       safeFetch(`${DRAMABOX_SEARCH}?query=${encodeURIComponent(q)}`),
       safeFetch(`${NETSHORT_SEARCH}?query=${encodeURIComponent(q)}`),
-      safeFetch(`${MELOLO_SEARCH}?query=${encodeURIComponent(q)}&limit=10&offset=0`),
+      safeFetch(
+        `${MELOLO_SEARCH}?query=${encodeURIComponent(q)}&limit=10&offset=0`
+      ),
       fetchFlickSearchViaSocks(flickUrl, debug, debugLog),
     ]);
 
@@ -312,7 +334,8 @@ export async function GET(req) {
     });
 
     /* ===============================
-       FLICKREELS SEARCH (status_code:1, data:[])
+       FLICKREELS SEARCH
+       response: { status_code: 1, msg: "...", data: [...] }
     =============================== */
     if (Array.isArray(flickJson?.data)) {
       flickJson.data.forEach((item) => {
@@ -335,7 +358,6 @@ export async function GET(req) {
 
     const results = Array.from(map.values());
 
-    // debug headers
     const respHeaders = new Headers();
     if (debug) {
       respHeaders.set("X-Flick-Proxy-Mode", flickDebug.meta?.mode || "unknown");
