@@ -2,7 +2,7 @@
   "crons": [
     {
       "path": "/api/proxy-refresh",
-      "schedule": "*/10 * * * *"
+      "schedule": "0 0 * * *"
     }
   ]
 }
